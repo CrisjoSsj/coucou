@@ -234,19 +234,25 @@ struct ApprovalView: View {
         ZStack {
             CardBackground(wash: .amber)
             VStack(alignment: .leading, spacing: 5) {
-                AgentWho(task: state.focusTask, label: "needs permission")
+                let isQuestion = approval?.tool == "AskUserQuestion"
+                AgentWho(task: state.focusTask, label: isQuestion ? "is asking a question" : "needs permission")
                 CodeBlock(text: approval?.command ?? approval?.tool ?? "…")
                 HStack(spacing: 8) {
                     SecondaryButton("Deny") {
                         HookServer.shared.sendApprovalDecision("deny")
                     }
-                    PrimaryButton("Allow") {
-                        HookServer.shared.sendApprovalDecision("allow")
-                    }
-                    // Codex rejects updatedPermissions, so "Always" is not offered
-                    if approval?.pillId != "agent_codex" {
-                        SecondaryButton("Always") {
-                            HookServer.shared.sendApprovalDecision("always")
+                    if isQuestion {
+                        PrimaryButton("Reply in terminal") {
+                            HookServer.shared.sendApprovalDecision("ask")
+                        }
+                    } else {
+                        PrimaryButton("Allow") {
+                            HookServer.shared.sendApprovalDecision("allow")
+                        }
+                        if approval?.pillId != "agent_codex" {
+                            SecondaryButton("Always") {
+                                HookServer.shared.sendApprovalDecision("always")
+                            }
                         }
                     }
                 }
@@ -829,13 +835,8 @@ struct PromptView: View {
                     }
                     .buttonStyle(.plain)
                     .popover(isPresented: $showModelPicker, arrowEdge: .bottom) {
-                        if state.chatEngine == .claude {
-                            SubscriptionModelPicker(state: state, isPresented: $showModelPicker)
-                                .frame(width: 280)
-                        } else {
-                            ModelPickerView(state: state, isPresented: $showModelPicker)
-                                .frame(width: 300)
-                        }
+                        ModelPickerView(state: state, isPresented: $showModelPicker)
+                            .frame(width: 320)
                     }
                 }
                 .padding(.horizontal, 10)
@@ -982,57 +983,86 @@ struct ModelPickerView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // Provider chips
-            HStack(spacing: 6) {
-                ForEach(ChatProvider.allCases, id: \.self) { provider in
-                    Button {
-                        guard provider != state.chatProvider else { return }
-                        withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
-                            state.chatProvider = provider
-                        }
-                        NotificationCenter.default.post(name: .triggerEmote, object: BotEmote.surprised)
-                        SoundEngine.shared.play("pop")
-                    } label: {
-                        HStack(spacing: 5) {
-                            Circle()
-                                .fill(Color(hex: provider.accentHex))
-                                .frame(width: 7, height: 7)
-                            Text(provider.displayName)
-                                .font(.system(size: 12, weight: state.chatProvider == provider ? .semibold : .regular))
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(state.chatProvider == provider
-                                    ? Color(hex: provider.accentHex).opacity(0.18)
-                                    : Color.white.opacity(0.06))
-                        .overlay(Capsule().stroke(
-                            state.chatProvider == provider
-                                ? Color(hex: provider.accentHex).opacity(0.5)
-                                : Color.white.opacity(0.1),
-                            lineWidth: 1))
-                        .clipShape(Capsule())
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    sourceChip(title: CoucouL10n.string("Subscription"), color: "#D97757", selected: usingSubscription) {
+                        useSubscription()
                     }
-                    .buttonStyle(.plain)
+                    ForEach(ChatProvider.allCases, id: \.self) { provider in
+                        sourceChip(title: provider.displayName, color: provider.accentHex, selected: usingAPI(provider)) {
+                            useAPI(provider)
+                        }
+                    }
                 }
             }
 
             Divider().opacity(0.2)
 
-            // Model list for current provider — fetched dynamically
             modelListView
                 .frame(height: 260, alignment: .top)
         }
         .padding(14)
         .background(Color(hex: "#16171B"))
-        .onAppear { state.fetchModelsIfNeeded(for: state.chatProvider) }
+        .onAppear { if !usingSubscription { state.fetchModelsIfNeeded(for: state.chatProvider) } }
         .onChange(of: state.chatProvider) { _, provider in
-            state.fetchModelsIfNeeded(for: provider)
+            if state.chatEngine == .api { state.fetchModelsIfNeeded(for: provider) }
         }
+    }
+
+    private var usingSubscription: Bool { state.chatEngine == .claude }
+
+    private func usingAPI(_ provider: ChatProvider) -> Bool {
+        state.chatEngine != .claude && state.chatProvider == provider
+    }
+
+    private func useSubscription() {
+        guard !usingSubscription else { return }
+        state.chatEngine = .claude
+        ClaudeService.shared.clearConversation()
+        state.chatHistory = []
+        let model = ClaudeModelCatalog.resolve(state.claudeModel)
+        if model != state.claudeModel { state.claudeModel = model }
+        ClaudeWarmSession.shared.prepare(model: state.claudeModel)
+        SoundEngine.shared.play("pop")
+    }
+
+    private func useAPI(_ provider: ChatProvider) {
+        guard !usingAPI(provider) else { return }
+        state.chatEngine = .api
+        state.chatProvider = provider
+        ClaudeService.shared.clearConversation()
+        state.chatHistory = []
+        state.fetchModelsIfNeeded(for: provider)
+        SoundEngine.shared.play("pop")
+    }
+
+    private func sourceChip(title: String, color: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Circle().fill(Color(hex: color)).frame(width: 7, height: 7)
+                Text(title)
+                    .font(.system(size: 12, weight: selected ? .semibold : .regular))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(selected ? Color(hex: color).opacity(0.18) : Color.white.opacity(0.06))
+            .overlay(Capsule().stroke(selected ? Color(hex: color).opacity(0.5) : Color.white.opacity(0.1), lineWidth: 1))
+            .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder
     private var modelListView: some View {
-        if state.loadingProviderModels.contains(state.chatProvider) {
+        if usingSubscription {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(ClaudeModelCatalog.load()) { choice in
+                        subscriptionRow(choice)
+                    }
+                }
+            }
+        } else if state.loadingProviderModels.contains(state.chatProvider) {
             HStack(spacing: 8) {
                 ProgressView().scaleEffect(0.7)
                 Text(CoucouL10n.string("Loading models…"))
@@ -1084,6 +1114,41 @@ struct ModelPickerView: View {
                 }
             }
         }
+    }
+
+    private func subscriptionRow(_ choice: ClaudeModelCatalog.Choice) -> some View {
+        let selected = state.claudeModel == choice.id
+        return Button {
+            state.chatEngine = .claude
+            state.claudeModel = choice.id
+            ClaudeWarmSession.shared.prepare(model: choice.id)
+            isPresented = false
+            SoundEngine.shared.play("blip")
+        } label: {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(choice.name)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Color(hex: "#F1F2F4"))
+                    if !choice.detail.isEmpty {
+                        Text(CoucouL10n.string(choice.detail))
+                            .font(.system(size: 10.5))
+                            .foregroundColor(Color(hex: "#8A8F98"))
+                    }
+                }
+                Spacer()
+                if selected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(Color(hex: "#D97757"))
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(selected ? Color(hex: "#D97757").opacity(0.12) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -1241,7 +1306,8 @@ struct SpotifyCardView: View {
     @ObservedObject private var state = AppState.shared
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let _ = state.appLanguage
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Circle().fill(Color(hex: "#1DB954")).frame(width: 7, height: 7)
                 Text("Spotify")
@@ -1249,20 +1315,8 @@ struct SpotifyCardView: View {
                     .foregroundColor(Color(hex: "#F5F6F8"))
             }
             if let now = state.spotifyNow {
-                HStack(spacing: 8) {
-                    artwork(now.artworkURL)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(now.title)
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(Color(hex: "#F5F6F8"))
-                            .lineLimit(1)
-                        Text(now.artist)
-                            .font(.system(size: 11))
-                            .foregroundColor(Color(hex: "#8E939C"))
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 4)
-                    controls(isPlaying: now.isPlaying)
+                TimelineView(.periodic(from: .now, by: now.isPlaying ? 0.5 : 30)) { context in
+                    playing(now, at: context.date)
                 }
             } else {
                 Text(CoucouL10n.string("Open Spotify"))
@@ -1270,9 +1324,48 @@ struct SpotifyCardView: View {
                     .foregroundColor(Color(hex: "#8E939C"))
             }
         }
-        .padding(.top, 8)
+        .padding(.top, 6)
         .padding(.leading, 108)
-        .padding(.trailing, 16)
+        .padding(.trailing, 14)
+    }
+
+    private func playing(_ now: SpotifyNow, at date: Date) -> some View {
+        let elapsed = now.elapsed(at: date)
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                artwork(now.artworkURL)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(now.title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Color(hex: "#F5F6F8"))
+                        .lineLimit(1)
+                    Text(now.artist)
+                        .font(.system(size: 11))
+                        .foregroundColor(Color(hex: "#8E939C"))
+                        .lineLimit(1)
+                }
+            }
+            progress(elapsed: elapsed, duration: now.duration)
+            controls(now)
+        }
+    }
+
+    private func progress(elapsed: TimeInterval, duration: TimeInterval) -> some View {
+        HStack(spacing: 6) {
+            Text(SpotifyNow.clock(elapsed))
+                .font(.system(size: 9, weight: .medium))
+                .monospacedDigit()
+                .foregroundColor(Color(hex: "#8E939C"))
+                .frame(width: 32, alignment: .leading)
+            SpotifySeekBar(elapsed: elapsed, duration: duration) { seconds in
+                SpotifyPoller.shared.command(.seek(seconds))
+            }
+            Text(SpotifyNow.clock(duration))
+                .font(.system(size: 9, weight: .medium))
+                .monospacedDigit()
+                .foregroundColor(Color(hex: "#8E939C"))
+                .frame(width: 32, alignment: .trailing)
+        }
     }
 
     private func artwork(_ url: URL?) -> some View {
@@ -1281,30 +1374,91 @@ struct SpotifyCardView: View {
         } placeholder: {
             Color.white.opacity(0.08)
         }
-        .frame(width: 36, height: 36)
+        .frame(width: 32, height: 32)
         .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
-    private func controls(isPlaying: Bool) -> some View {
+    private func controls(_ now: SpotifyNow) -> some View {
         HStack(spacing: 4) {
-            spotifyButton("backward.fill") { SpotifyPoller.shared.command(.previous) }
-            spotifyButton(isPlaying ? "pause.fill" : "play.fill") {
+            spotifyButton("shuffle", label: "Shuffle", isOn: now.isShuffling) {
+                SpotifyPoller.shared.command(.shuffle)
+            }
+            spotifyButton("backward.fill", label: "Previous track") {
+                SpotifyPoller.shared.command(.previous)
+            }
+            spotifyButton(now.isPlaying ? "pause.fill" : "play.fill", label: now.isPlaying ? "Pause" : "Play") {
                 SpotifyPoller.shared.command(.playPause)
             }
-            spotifyButton("forward.fill") { SpotifyPoller.shared.command(.next) }
+            spotifyButton("forward.fill", label: "Next track") {
+                SpotifyPoller.shared.command(.next)
+            }
+            spotifyButton("repeat", label: "Repeat", isOn: now.isRepeating) {
+                SpotifyPoller.shared.command(.repeatPlayback)
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 
-    private func spotifyButton(_ symbol: String, action: @escaping () -> Void) -> some View {
+    private func spotifyButton(
+        _ symbol: String,
+        label: String,
+        isOn: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(Color(hex: "#F5F6F8"))
-                .frame(width: 28, height: 28)
-                .background(Color.white.opacity(0.08))
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(Color(hex: isOn ? "#1DB954" : "#F5F6F8"))
+                .frame(width: 26, height: 26)
+                .background(Color(hex: isOn ? "#1DB954" : "#FFFFFF").opacity(isOn ? 0.2 : 0.08))
                 .clipShape(Circle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(CoucouL10n.string(label))
+    }
+}
+
+private struct SpotifySeekBar: View {
+    let elapsed: TimeInterval
+    let duration: TimeInterval
+    let onSeek: (TimeInterval) -> Void
+    @State private var dragFraction: CGFloat?
+
+    var body: some View {
+        GeometryReader { geo in
+            let fraction = dragFraction ?? liveFraction
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.white.opacity(0.14)).frame(height: 3)
+                Capsule()
+                    .fill(Color(hex: "#1DB954"))
+                    .frame(width: max(3, geo.size.width * fraction), height: 3)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .gesture(seekGesture(width: geo.size.width))
+            .accessibilityLabel(CoucouL10n.string("Playback position"))
+            .accessibilityValue("\(SpotifyNow.clock(elapsed)) / \(SpotifyNow.clock(duration))")
+        }
+        .frame(height: 14)
+    }
+
+    private var liveFraction: CGFloat {
+        guard duration > 0 else { return 0 }
+        return CGFloat(min(1, max(0, elapsed / duration)))
+    }
+
+    private func seekGesture(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                guard width > 0 else { return }
+                dragFraction = min(1, max(0, value.location.x / width))
+            }
+            .onEnded { value in
+                guard width > 0, duration > 0 else { dragFraction = nil; return }
+                let fraction = min(1, max(0, value.location.x / width))
+                dragFraction = nil
+                onSeek(Double(fraction) * duration)
+            }
     }
 }
 
@@ -1592,7 +1746,7 @@ struct IntegrationCardView: View {
                         if isConfigured {
                             let provider: ChatProvider = task.id == "ai_anthropic" ? .anthropic
                                                        : task.id == "ai_google"    ? .google : .openai
-                            Button("Chat with \(task.name)") {
+                            Button(CoucouL10n.format("Chat with %@", task.name)) {
                                 switchChatProvider(provider)
                             }
                             .font(.system(size: 11, weight: .medium))
@@ -1623,7 +1777,7 @@ struct IntegrationCardView: View {
                         }
                         .buttonStyle(.plain)
                     } else if let url = openURL {
-                        Button("Open \(task.name)") { NSWorkspace.shared.open(url) }
+                        Button(CoucouL10n.format("Open %@", task.name)) { NSWorkspace.shared.open(url) }
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(Color(hex: task.color).opacity(0.85))
                             .buttonStyle(.plain)
@@ -1692,6 +1846,32 @@ struct IntegrationCardView: View {
 
 // MARK: - Vercel Deployment List View
 
+private struct StatusDot: View {
+    let hex: String
+    let isLive: Bool
+    var size: CGFloat = 5
+    @State private var isDim = false
+
+    var body: some View {
+        Circle()
+            .fill(Color(hex: hex))
+            .frame(width: size, height: size)
+            .opacity(isLive && isDim ? 0.3 : 1)
+            .onAppear { pulse(isLive) }
+            .onChange(of: isLive) { _, live in pulse(live) }
+    }
+
+    private func pulse(_ live: Bool) {
+        guard live else {
+            isDim = false
+            return
+        }
+        withAnimation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true)) {
+            isDim = true
+        }
+    }
+}
+
 struct VercelDeploymentListView: View {
     let deployments: [VercelDeployment]
     let onOpenDetail: () -> Void
@@ -1718,14 +1898,17 @@ struct VercelDeploymentListView: View {
             VStack(alignment: .leading, spacing: 3) {
                 // First deployment — highlighted, with detail button
                 if let first = deployments.first {
-                    let accent = Color(hex: first.isSuccess ? "#22C55E" : "#F4505E")
+                    let accent = Color(hex: first.accentHex)
                     HStack(spacing: 5) {
-                        Circle().fill(accent).frame(width: 5, height: 5)
+                        StatusDot(hex: first.accentHex, isLive: first.isInProgress, size: 5)
                         Text(first.projectName)
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(Color(hex: "#C5C8CD"))
                             .lineLimit(1).truncationMode(.tail)
                             .layoutPriority(1)
+                        Text(first.statusLabel)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(accent)
                         Text(first.timeAgo)
                             .font(.system(size: 10))
                             .foregroundColor(Color(hex: "#6B7079"))
@@ -1746,9 +1929,8 @@ struct VercelDeploymentListView: View {
 
                 // Remaining deployments — plain rows, identical structure → perfect alignment
                 ForEach(Array(deployments.dropFirst().prefix(2))) { dep in
-                    let accent = Color(hex: dep.isSuccess ? "#22C55E" : "#F4505E")
                     HStack(spacing: 5) {
-                        Circle().fill(accent).frame(width: 5, height: 5)
+                        StatusDot(hex: dep.accentHex, isLive: dep.isInProgress, size: 5)
                         Text(dep.projectName)
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(Color(hex: "#9398A1"))
@@ -1777,7 +1959,7 @@ struct VercelDetailView: View {
     let deployment: VercelDeployment
     let onClose: () -> Void
 
-    private var accent: Color { Color(hex: deployment.isSuccess ? "#22C55E" : "#F4505E") }
+    private var accent: Color { Color(hex: deployment.accentHex) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1792,7 +1974,7 @@ struct VercelDetailView: View {
                 }
                 .buttonStyle(.plain)
 
-                Circle().fill(accent).frame(width: 6, height: 6)
+                StatusDot(hex: deployment.accentHex, isLive: deployment.isInProgress, size: 6)
                 Text(deployment.projectName)
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(Color(hex: "#F5F6F8"))
@@ -2929,14 +3111,16 @@ extension CardBackground where Content == EmptyView {
 struct AgentWho: View {
     let task: AgentTask?
     let label: String
+    @ObservedObject private var appState = AppState.shared
 
     var body: some View {
+        let _ = appState.appLanguage
         HStack(spacing: 7) {
             if let task = task {
                 Circle().fill(Color(hex: task.color)).frame(width: 8, height: 8)
                 Text(task.name).font(.system(size: 12, weight: .semibold)).foregroundColor(Color(hex: "#F5F6F8"))
             }
-            Text(label).font(.system(size: 12)).foregroundColor(Color(hex: "#8E939C"))
+            Text(CoucouL10n.string(label)).font(.system(size: 12)).foregroundColor(Color(hex: "#8E939C"))
         }
     }
 }
@@ -3061,15 +3245,17 @@ struct PrimaryButton: View {
     let title: String
     let kbd: String?
     let action: () -> Void
+    @ObservedObject private var appState = AppState.shared
 
     init(_ title: String, kbd: String? = nil, action: @escaping () -> Void) {
         self.title = title; self.kbd = kbd; self.action = action
     }
 
     var body: some View {
+        let _ = appState.appLanguage
         Button(action: action) {
             HStack(spacing: 7) {
-                Text(title).font(.system(size: 12.5, weight: .medium))
+                Text(CoucouL10n.string(title)).font(.system(size: 12.5, weight: .medium))
                 if let k = kbd {
                     Text(k).font(.system(size: 10.5))
                         .padding(.horizontal, 4)
@@ -3090,15 +3276,17 @@ struct SecondaryButton: View {
     let title: String
     let kbd: String?
     let action: () -> Void
+    @ObservedObject private var appState = AppState.shared
 
     init(_ title: String, kbd: String? = nil, action: @escaping () -> Void) {
         self.title = title; self.kbd = kbd; self.action = action
     }
 
     var body: some View {
+        let _ = appState.appLanguage
         Button(action: action) {
             HStack(spacing: 7) {
-                Text(title).font(.system(size: 12.5, weight: .medium))
+                Text(CoucouL10n.string(title)).font(.system(size: 12.5, weight: .medium))
                 if let k = kbd {
                     Text(k).font(.system(size: 10.5))
                         .padding(.horizontal, 4)
@@ -3193,7 +3381,7 @@ struct SettingsIslandView: View {
                         .font(.system(size: 12))
                         .foregroundColor(Color(hex: "#8E939C"))
                         .frame(width: 16)
-                    Text("Auto-close · \(Int(state.autoCloseInterval))s")
+                    Text(CoucouL10n.format("Auto-close · %ds", Int(state.autoCloseInterval)))
                         .font(.system(size: 12))
                         .foregroundColor(Color(hex: "#C5C8CD"))
                     Spacer()

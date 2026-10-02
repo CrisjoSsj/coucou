@@ -255,10 +255,8 @@ final class AppState: ObservableObject {
     }
 
     @Published var appLanguage: AppLanguage = .en {
-        didSet {
-            UserDefaults.standard.set(appLanguage.rawValue, forKey: "appLanguage")
-            CoucouL10n.apply(appLanguage)
-        }
+        willSet { CoucouL10n.apply(newValue) }
+        didSet { UserDefaults.standard.set(appLanguage.rawValue, forKey: "appLanguage") }
     }
 
     // Which AI answers the chat — persisted. nil until the user picks one or the
@@ -507,7 +505,17 @@ struct VercelDeployment: Identifiable {
     let branch: String?
 
     var isSuccess: Bool { state == "READY" }
-    var statusLabel: String { isSuccess ? "Ready" : (state == "CANCELED" ? "Canceled" : "Error") }
+    var isInProgress: Bool { state == "BUILDING" || state == "QUEUED" || state == "INITIALIZING" }
+    var accentHex: String {
+        if isSuccess { return "#22C55E" }
+        if isInProgress { return "#F5A524" }
+        return "#F4505E"
+    }
+    var statusLabel: String {
+        if isSuccess { return CoucouL10n.string("Ready") }
+        if isInProgress { return CoucouL10n.string("Building") }
+        return CoucouL10n.string("Failed")
+    }
     var timeAgo: String {
         let diff = Date().timeIntervalSince(createdAt)
         if diff < 60    { return "just now" }
@@ -524,6 +532,27 @@ struct SpotifyNow: Equatable {
     var artist: String
     var isPlaying: Bool
     var artworkURL: URL?
+    var position: TimeInterval
+    var duration: TimeInterval
+    var isShuffling: Bool
+    var isRepeating: Bool
+    var fetchedAt: Date
+
+    func elapsed(at date: Date) -> TimeInterval {
+        let extra = isPlaying ? max(0, date.timeIntervalSince(fetchedAt)) : 0
+        let raw = position + extra
+        guard duration > 0 else { return max(0, raw) }
+        return min(duration, max(0, raw))
+    }
+
+    static func clock(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds.rounded(.down)))
+        let minutes = (total % 3600) / 60
+        let secs = total % 60
+        let hours = total / 3600
+        if hours > 0 { return String(format: "%d:%02d:%02d", hours, minutes, secs) }
+        return String(format: "%d:%02d", minutes, secs)
+    }
 }
 
 struct ResendEmail: Identifiable {

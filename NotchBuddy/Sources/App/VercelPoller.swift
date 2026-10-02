@@ -1,31 +1,64 @@
 import Foundation
 
 // MARK: - VercelPoller
-// Polls Vercel API for latest deployments every 30s.
-// On new terminal deployment: updates integration_vercel task state + AppState.vercelDeployments.
+// Polls Vercel often enough that a new deploy shows up within a few seconds.
+// A new Ready or Failed deploy opens the island on that project.
 
 final class VercelPoller: @unchecked Sendable {
     static let shared = VercelPoller()
     private var timer: DispatchSourceTimer?
-    private var lastDeploymentId: String = ""
+    private var isLivePoll = false
+    private var didBaseline = false
+    private var seenStates: [String: String] = [:]
+    private var noticeGeneration = 0
+    private var dismissGeneration = 0
+    private var cachedTeamIds: [String] = []
+    private var teamsFetchedAt = Date.distantPast
 
     private init() {}
 
     func start() {
         guard timer == nil else { return }
-        let t = DispatchSource.makeTimerSource(queue: .global(qos: .background))
-        t.schedule(deadline: .now() + 5, repeating: 30)
+        armTimer(live: false, firstDelay: 2)
+    }
+
+    /// Quiet poll is 8s. While a build is running, 4s, so Ready/Failed lands quickly.
+    private func armTimer(live: Bool, firstDelay: TimeInterval? = nil) {
+        guard timer == nil || live != isLivePoll else { return }
+        isLivePoll = live
+        timer?.cancel()
+        let interval: TimeInterval = live ? 4 : 8
+        let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        t.schedule(deadline: .now() + (firstDelay ?? interval), repeating: interval)
         t.setEventHandler { [weak self] in self?.poll() }
         t.resume()
         timer = t
+    }
+
+    /// Newest Ready or Failed deploy whose state just changed. Failures win over successes.
+    static func freshResult(among current: [VercelDeployment], seen: [String: String], hasBaseline: Bool) -> VercelDeployment? {
+        guard hasBaseline else { return nil }
+        var failed: VercelDeployment?
+        var ready: VercelDeployment?
+        for item in current where seen[item.id] != item.state {
+            if item.state == "ERROR", failed == nil { failed = item }
+            if item.state == "READY", ready == nil { ready = item }
+        }
+        return failed ?? ready
     }
 
     // MARK: - Poll
 
     private func poll() {
         guard let token = KeychainStore.shared.get("vercel-token") else { return }
+        if !cachedTeamIds.isEmpty, Date().timeIntervalSince(teamsFetchedAt) < 600 {
+            fetchDeployments(token: token, teamIds: cachedTeamIds)
+            return
+        }
         Self.fetchJSON(token: token, url: URL(string: "https://api.vercel.com/v2/teams")) { json in
             let teamIds = (json?["teams"] as? [[String: Any]])?.compactMap { $0["id"] as? String } ?? []
+            self.cachedTeamIds = teamIds
+            self.teamsFetchedAt = Date()
             self.fetchDeployments(token: token, teamIds: teamIds)
         }
     }
@@ -57,8 +90,8 @@ final class VercelPoller: @unchecked Sendable {
         }
     }
 
-    /// Canceled builds are replaced by a newer one. They are not the project's result.
-    private static let shownStates = ["READY", "ERROR"]
+    /// Canceled builds are replaced by a newer one. In-progress builds stay so the dot can move.
+    private static let shownStates = ["READY", "ERROR", "BUILDING", "QUEUED", "INITIALIZING"]
 
     private static func deploymentsURL(teamId: String?) -> URL? {
         var parts = URLComponents(string: "https://api.vercel.com/v6/deployments")
@@ -143,36 +176,84 @@ final class VercelPoller: @unchecked Sendable {
     @MainActor
     private func handleDeployments(_ deployments: [VercelDeployment]) {
         let appState = AppState.shared
-        appState.vercelDeployments = deployments
-
-        // Apply project filter (empty = all projects)
         let filter = appState.vercelProjectFilter
-        let filtered = filter.isEmpty ? deployments : deployments.filter { filter.contains($0.projectName) }
-        guard let latest = filtered.first else { return }
-        guard latest.id != lastDeploymentId else { return }
-        lastDeploymentId = latest.id
+        let visible = filter.isEmpty ? deployments : deployments.filter { filter.contains($0.projectName) }
+        guard !visible.isEmpty else { return }
+        let hot = Self.freshResult(among: visible, seen: seenStates, hasBaseline: didBaseline)
+        didBaseline = true
+        var nextSeen: [String: String] = [:]
+        for item in visible { nextSeen[item.id] = item.state }
+        seenStates = nextSeen
+        armTimer(live: visible.contains(where: \.isInProgress))
 
-        guard let idx = appState.tasks.firstIndex(where: { $0.id == "integration_vercel" }) else { return }
-        let focused = appState.focusId == "integration_vercel"
-
-        appState.tasks[idx].state = latest.isSuccess ? .finished : .error
-        appState.tasks[idx].steps = [latest.projectName]
-
-        if !focused {
-            appState.tasks[idx].pillBadge = latest.isSuccess ? .finished : .error
+        var shown = visible
+        if let hot {
+            shown.removeAll { $0.id == hot.id }
+            shown.insert(hot, at: 0)
         }
-        SoundEngine.shared.play(latest.isSuccess ? "finish" : "error")
+        appState.vercelDeployments = shown
+        guard let idx = appState.tasks.firstIndex(where: { $0.id == "integration_vercel" }) else { return }
 
-        // Reveal compact island so user sees the badge
-        NotificationCenter.default.post(name: .hookReveal, object: nil)
+        if let hot {
+            show(hot, on: appState, taskIndex: idx)
+        } else if let building = visible.first(where: \.isInProgress) {
+            markBuilding(building, on: appState, taskIndex: idx)
+        } else if appState.tasks[idx].state == .working {
+            appState.tasks[idx].state = .idle
+            appState.tasks[idx].steps = []
+        }
+    }
 
-        // Auto-clear task state after 60s (deployments list stays)
+    @MainActor
+    private func markBuilding(_ deployment: VercelDeployment, on appState: AppState, taskIndex: Int) {
+        guard appState.tasks[taskIndex].state != .working else { return }
+        appState.tasks[taskIndex].state = .working
+        appState.tasks[taskIndex].steps = [deployment.projectName]
+    }
+
+    @MainActor
+    private func show(_ deployment: VercelDeployment, on appState: AppState, taskIndex: Int) {
+        let failed = deployment.state == "ERROR"
+        appState.tasks[taskIndex].state = failed ? .error : .finished
+        appState.tasks[taskIndex].steps = [deployment.projectName]
+        SoundEngine.shared.play(failed ? "error" : "finish")
+
+        if appState.pendingApproval == nil {
+            let wasExpanded = appState.mode == .expanded
+            appState.setFocus("integration_vercel")
+            NotificationCenter.default.post(name: .hookExpand, object: IslandView.overview)
+            if !wasExpanded { scheduleDismiss() }
+        } else if appState.focusId != "integration_vercel" {
+            appState.tasks[taskIndex].pillBadge = failed ? .error : .finished
+        }
+        scheduleIdleReset()
+    }
+
+    @MainActor
+    private func scheduleDismiss() {
+        dismissGeneration += 1
+        let generation = dismissGeneration
+        let delay = AppState.shared.autoCloseInterval
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            guard self.dismissGeneration == generation else { return }
+            let state = AppState.shared
+            guard state.pendingApproval == nil, state.mode == .expanded, state.view == .overview else { return }
+            NotificationCenter.default.post(name: .islandCollapse, object: nil)
+        }
+    }
+
+    @MainActor
+    private func scheduleIdleReset() {
+        noticeGeneration += 1
+        let generation = noticeGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
-            guard let i = appState.tasks.firstIndex(where: { $0.id == "integration_vercel" }) else { return }
-            guard appState.tasks[i].state == .finished || appState.tasks[i].state == .error else { return }
-            appState.tasks[i].state = .idle
-            appState.tasks[i].steps = []
-            appState.tasks[i].pillBadge = nil
+            guard self.noticeGeneration == generation else { return }
+            let state = AppState.shared
+            guard let index = state.tasks.firstIndex(where: { $0.id == "integration_vercel" }) else { return }
+            guard state.tasks[index].state == .finished || state.tasks[index].state == .error else { return }
+            state.tasks[index].state = .idle
+            state.tasks[index].steps = []
+            state.tasks[index].pillBadge = nil
         }
     }
 }

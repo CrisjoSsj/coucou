@@ -224,6 +224,8 @@ final class HookServer: @unchecked Sendable {
         let termProgram = payload["term_program"] as? String ?? ""
         let bundleId    = payload["bundle_id"]    as? String ?? ""
 
+        let isClaudeDesktop = bundleId.lowercased().contains("claudefordesktop")
+
         // Cursor identified solely by its stable Electron bundle ID.
         // ToDesktop builds other apps too — do not match on "todesktop" alone.
         let isCursorEditor = bundleId.lowercased() == "com.todesktop.230313mzl4w4u92"
@@ -252,12 +254,9 @@ final class HookServer: @unchecked Sendable {
         } else if isCursorEditor {
             agentId = "agent_cursor"
             isExternalAgent = false
-        } else if isVSCodeEditor {
+        } else {
             agentId = "integration_claude"
             isExternalAgent = false
-        } else {
-            nbLog("Ignored \(name) from \(termProgram.isEmpty ? bundleId : termProgram) (\(projectName))")
-            return
         }
 
         let focused = state.focusId == agentId
@@ -267,9 +266,12 @@ final class HookServer: @unchecked Sendable {
         if let pending = state.pendingApproval, agentId == pending.pillId {
             let handledNote: String
             switch pending.pillId {
-            case "agent_cursor": handledNote = "Handled in Cursor."
-            case "agent_codex":  handledNote = "Handled in Codex."
-            default:             handledNote = "Handled in VS Code."
+            case "agent_cursor": handledNote = CoucouL10n.string("Handled in Cursor.")
+            case "agent_codex":  handledNote = CoucouL10n.string("Handled in Codex.")
+            default:
+                if isVSCodeEditor { handledNote = CoucouL10n.string("Handled in VS Code.") }
+                else if isClaudeDesktop { handledNote = CoucouL10n.string("Handled in Claude.") }
+                else { handledNote = CoucouL10n.string("Handled in terminal.") }
             }
             var resolved = false
             switch name {
@@ -465,12 +467,8 @@ final class HookServer: @unchecked Sendable {
         let projectName = aliasProjectName(rawName.isEmpty ? "Session" : rawName)
 
         let rawAgent = payload["coucou_agent"] as? String ?? ""
-        let termProgram = payload["term_program"] as? String ?? ""
-        let bundleId    = payload["bundle_id"]    as? String ?? ""
+        let bundleId = payload["bundle_id"] as? String ?? ""
         let isCursorEditor = bundleId.lowercased() == "com.todesktop.230313mzl4w4u92"
-        let isVSCodeEditor = !isCursorEditor && (
-            termProgram.lowercased().contains("vscode") ||
-            bundleId.lowercased().contains("vscode"))
 
         // Codex gets the same approval card as Claude Code / Cursor (GitHub build only).
         // Other external agents (any other coucou_agent) answer immediately with "ask"
@@ -497,17 +495,18 @@ final class HookServer: @unchecked Sendable {
         } else {
             pillId = "integration_claude"
         }
-        guard isCodexRequest || isCursorEditor || isVSCodeEditor else {
-            Task.detached { [weak self] in
-                self?.sendLine(fd: fd, text: #"{"permissionDecision":"ask"}"#)
-                close(fd)
-            }
-            return
-        }
 
         let tool = payload["tool_name"] as? String ?? "Tool"
         let toolInput = payload["tool_input"] as? [String: Any] ?? [:]
         var command = toolInput["command"] as? String ?? tool
+        if tool == "AskUserQuestion" {
+            if let questions = toolInput["questions"] as? [[String: Any]],
+               let firstQuestion = questions.first?["question"] as? String, !firstQuestion.isEmpty {
+                command = firstQuestion
+            } else if let question = toolInput["question"] as? String, !question.isEmpty {
+                command = question
+            }
+        }
         let inputKey = Self.approvalInputKey(toolInput)
         nbLog("PermissionRequest \(tool) [\(pillId)]")
 
@@ -547,9 +546,9 @@ final class HookServer: @unchecked Sendable {
             guard let self, self.pendingApprovalFD == fd else { return }
             let note: String
             switch capturedPillId {
-            case "agent_cursor": note = "Handled in Cursor."
-            case "agent_codex":  note = "Handled in Codex."
-            default:             note = "Handled in VS Code."
+            case "agent_cursor": note = CoucouL10n.string("Handled in Cursor.")
+            case "agent_codex":  note = CoucouL10n.string("Handled in Codex.")
+            default:             note = CoucouL10n.string("Handled in terminal.")
             }
             self.dismissApprovalCard(note: note)
         }
@@ -564,9 +563,9 @@ final class HookServer: @unchecked Sendable {
             guard let self, self.pendingApprovalFD == captured else { return }
             let note: String
             switch capturedPillId {
-            case "agent_cursor": note = "Still waiting in Cursor."
-            case "agent_codex":  note = "Still waiting in Codex."
-            default:             note = "Still waiting in VS Code."
+            case "agent_cursor": note = CoucouL10n.string("Still waiting in Cursor.")
+            case "agent_codex":  note = CoucouL10n.string("Still waiting in Codex.")
+            default:             note = CoucouL10n.string("Still waiting in the terminal.")
             }
             self.dismissApprovalCard(note: note)
         }

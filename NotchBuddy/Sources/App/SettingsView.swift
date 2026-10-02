@@ -104,6 +104,7 @@ struct SettingsView: View {
     }
 
     var body: some View {
+        let _ = state.appLanguage
         VStack(spacing: 0) {
             Picker(CoucouL10n.string("Section"), selection: $settingsPage) {
                 ForEach(SettingsPage.allCases) { page in
@@ -121,7 +122,13 @@ struct SettingsView: View {
 
                 if settingsPage == .notch {
                 GroupBox(CoucouL10n.string("Language")) {
-                    Picker(CoucouL10n.string("Language"), selection: $state.appLanguage) {
+                    Picker(CoucouL10n.string("Language"), selection: Binding(
+                        get: { state.appLanguage },
+                        set: { newValue in
+                            CoucouL10n.apply(newValue)
+                            state.appLanguage = newValue
+                        }
+                    )) {
                         Text(CoucouL10n.string("English")).tag(AppLanguage.en)
                         Text(CoucouL10n.string("Español")).tag(AppLanguage.es)
                     }
@@ -141,7 +148,7 @@ struct SettingsView: View {
                             .font(.system(size: 11))
                             .foregroundColor(state.activeIntegrations.count >= 4 ? .orange : .secondary)
 
-                        Picker("Main", selection: $state.mainPillId) {
+                        Picker(CoucouL10n.string("Main"), selection: $state.mainPillId) {
                             ForEach(PillCatalog.available.filter { $0.category == .workspace && !$0.comingSoon }, id: \.id) { def in
                                 Text(def.name).tag(def.id)
                             }
@@ -466,7 +473,7 @@ struct SettingsView: View {
                 #endif
 
                 #if !APPSTORE
-                GroupBox("Codex Hooks") {
+                GroupBox(CoucouL10n.string("Codex Hooks")) {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(codexHooksInstalled
                              ? "Hooks installed — open Codex and run /hooks or open Hooks in the app's settings to trust them"
@@ -649,7 +656,6 @@ struct SettingsView: View {
             }
         }
         .frame(minWidth: 420, maxWidth: .infinity, minHeight: 320, maxHeight: .infinity)
-        .id(state.appLanguage)
         }
     }
 
@@ -1027,7 +1033,7 @@ struct SettingsView: View {
                 .foregroundColor(atMax ? .secondary : .primary)
             Spacer()
             if isMain {
-                Text("Main")
+                Text(CoucouL10n.string("Main"))
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
             } else {
@@ -1098,7 +1104,7 @@ struct IntegrationFilterRow: View {
                 }
                 .padding(.leading, 4)
                 if !filter.isEmpty {
-                    Text("Watching \(filter.count) of \(items.count)")
+                    Text(CoucouL10n.format("Watching %d of %d", filter.count, items.count))
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
                 }

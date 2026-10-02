@@ -445,6 +445,7 @@ final class IslandWindowController: NSWindowController {
                 self.state.stateOverride = nil
                 self.hideDragGhost()
                 #if !APPSTORE
+                if self.isOverIsland(mouse) { return }
                 if let ctx = self.windowContextAtPoint(mouse) {
                     self.state.promptContext = ctx
                     SoundEngine.shared.play("approve")
@@ -572,18 +573,12 @@ final class IslandWindowController: NSWindowController {
 
     private func updateWindowHighlight() {
         let mouse = NSEvent.mouseLocation
+        if isOverIsland(mouse) {
+            dismissWindowHighlight()
+            return
+        }
         guard let (appKitBounds, pid) = windowBoundsAtScreenPoint(mouse) else {
-            // Fade out + close if no window under cursor
-            if let old = highlightPanel {
-                let captured = old
-                highlightPanel = nil
-                highlightWindowPid = 0
-                NSAnimationContext.runAnimationGroup({ ctx in
-                    ctx.duration = 0.12
-                    ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
-                    captured.animator().alphaValue = 0
-                }, completionHandler: { captured.close() })
-            }
+            dismissWindowHighlight()
             return
         }
 
@@ -683,6 +678,25 @@ final class IslandWindowController: NSWindowController {
             return WindowContextCapture.captureActive(from: app)
         }
         return nil
+    }
+
+    /// Dropping Mochi back on the notch cancels the attach. The window behind the notch does not count.
+    private func isOverIsland(_ screenPoint: NSPoint) -> Bool {
+        guard let panel = window as? IslandPanel else { return false }
+        let local = CGPoint(x: screenPoint.x - panel.frame.minX, y: screenPoint.y - panel.frame.minY)
+        let home = panel.currentIslandFrame(nw: notchW, nh: notchH).insetBy(dx: -16, dy: -16)
+        return home.contains(local)
+    }
+
+    private func dismissWindowHighlight() {
+        guard let old = highlightPanel else { return }
+        highlightPanel = nil
+        highlightWindowPid = 0
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.12
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            old.animator().alphaValue = 0
+        }, completionHandler: { old.close() })
     }
 
     // MARK: - Coordinate conversion: window (AppKit, y-up) → island coords (y-down, 0,0 = island top-left)
