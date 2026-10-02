@@ -57,6 +57,11 @@ struct SettingsView: View {
     @State private var showAgyDiff: Bool = false
     @State private var pendingAgyJSON: String = ""
     @State private var agyPendingInstall: Bool = true
+
+    @State private var codexHooksInstalled: Bool = HookServer.codexHooksInstalled()
+    @State private var showCodexDiff: Bool = false
+    @State private var pendingCodexJSON: String = ""
+    @State private var codexPendingInstall: Bool = true
     #endif
 
     // Multi-provider chat keys
@@ -128,19 +133,6 @@ struct SettingsView: View {
                 // MARK: Active pills
                 GroupBox(CoucouL10n.string("Active pills")) {
                     VStack(alignment: .leading, spacing: 10) {
-                        // VS Code: always active (mirrors main branch row exactly)
-                        HStack {
-                            Text("VS Code")
-                                .font(.system(size: 12, weight: .semibold))
-                            Circle().fill(Color(hex: "#F5F6F8")).frame(width: 8, height: 8)
-                            Spacer()
-                            Text(CoucouL10n.string("Always active"))
-                                .font(.system(size: 11))
-                                .foregroundColor(.secondary)
-                        }
-
-                        Divider()
-
                         Text(CoucouL10n.string("Choose the tools you use. Coucou only shows what you declare here."))
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
@@ -149,28 +141,20 @@ struct SettingsView: View {
                             .font(.system(size: 11))
                             .foregroundColor(state.activeIntegrations.count >= 4 ? .orange : .secondary)
 
-                        // Main pill picker: shown only when a workspace pill (Cursor/Codex) is active
-                        let workspacePills = PillCatalog.available.filter {
-                            $0.category == .workspace && $0.id != "integration_claude"
-                                && state.activeIntegrations.contains($0.id)
+                        Picker("Main", selection: $state.mainPillId) {
+                            ForEach(PillCatalog.available.filter { $0.category == .workspace && !$0.comingSoon }, id: \.id) { def in
+                                Text(def.name).tag(def.id)
+                            }
                         }
-                        if !workspacePills.isEmpty {
-                            Picker(CoucouL10n.string("Main pill"), selection: $state.mainPillId) {
-                                Text("VS Code").tag("integration_claude")
-                                ForEach(workspacePills, id: \.id) { def in
-                                    Text(def.name).tag(def.id)
-                                }
-                            }
-                            .onChange(of: state.mainPillId) { _, newId in
-                                state.setFocus(newId)
-                            }
+                        .onChange(of: state.mainPillId) { _, newId in
+                            state.activeIntegrations.remove(newId)
+                            state.loadIntegrationTasks()
+                            state.setFocus(newId)
                         }
 
-                        // Categories — integration_claude excluded (shown above)
+                        // All categories — main pill shown with "Main" label instead of toggle
                         ForEach(PillCategory.allCases, id: \.self) { cat in
-                            let catPills = PillCatalog.available.filter {
-                                $0.category == cat && $0.id != "integration_claude"
-                            }
+                            let catPills = PillCatalog.available.filter { $0.category == cat }
                             if !catPills.isEmpty {
                                 Divider()
                                 Text(CoucouL10n.string(cat.title))
@@ -478,6 +462,41 @@ struct SettingsView: View {
                     }
                     .padding(6)
                 }
+                }
+                #endif
+
+                #if !APPSTORE
+                GroupBox("Codex Hooks") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(codexHooksInstalled
+                             ? "Hooks installed — open Codex and run /hooks or open Hooks in the app's settings to trust them"
+                             : "~/.codex/hooks.json")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                        HStack(spacing: 10) {
+                            Button(CoucouL10n.string("Install hooks")) { triggerCodexPreview(install: true) }
+                                .buttonStyle(.borderedProminent)
+                            Button(CoucouL10n.string("Uninstall")) { triggerCodexPreview(install: false) }
+                                .buttonStyle(.bordered)
+                        }
+                        if showCodexDiff {
+                            ScrollView {
+                                Text(pendingCodexJSON)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(height: 140)
+                            .background(Color(NSColor.textBackgroundColor))
+                            .cornerRadius(6)
+                            HStack {
+                                Button(CoucouL10n.string("Confirm & write")) { confirmCodexOp() }
+                                    .buttonStyle(.borderedProminent)
+                                Button(CoucouL10n.string("Cancel")) { showCodexDiff = false; pendingCodexJSON = "" }
+                                    .buttonStyle(.bordered)
+                            }
+                        }
+                    }
+                    .padding(6)
                 }
                 #endif
 
@@ -871,6 +890,33 @@ struct SettingsView: View {
             statusMessage = "❌ \(error.localizedDescription)"
         }
     }
+
+    private func triggerCodexPreview(install: Bool) {
+        do {
+            codexPendingInstall = install
+            pendingCodexJSON = try HookServer.shared.previewCodexHooks(install: install)
+            showCodexDiff = true
+            statusMessage = "Review the JSON below before confirming."
+        } catch let e as NSError where e.domain == "CoucouNoop" {
+            statusMessage = e.localizedDescription
+        } catch {
+            statusMessage = "❌ \(error.localizedDescription)"
+        }
+    }
+
+    private func confirmCodexOp() {
+        do {
+            try HookServer.shared.writeCodexHooks()
+            showCodexDiff = false
+            pendingCodexJSON = ""
+            codexHooksInstalled = codexPendingInstall
+            statusMessage = codexPendingInstall
+                ? "✓ Codex hooks installed — run /hooks in Codex or open Hooks in the app's settings to trust them."
+                : "✓ Codex hooks removed."
+        } catch {
+            statusMessage = "❌ \(error.localizedDescription)"
+        }
+    }
     #endif
 
     private func saveIntegrations() {
@@ -953,14 +999,17 @@ struct SettingsView: View {
 
     @ViewBuilder
     private func pillRow(_ def: PillDefinition) -> some View {
-        let isOn  = state.activeIntegrations.contains(def.id)
-        let atMax = state.activeIntegrations.count >= 4 && !isOn
-        // Status hint: shown in 11pt gray before the toggle
+        let isMain = def.id == state.mainPillId
+        let isOn   = state.activeIntegrations.contains(def.id)
+        let atMax  = state.activeIntegrations.count >= 4 && !isOn && !isMain
+        // Status hint: shown in 11pt gray before the toggle (not shown for main pill)
         let hint: String? = {
+            if isMain { return nil }
             if def.comingSoon { return CoucouL10n.string("Coming soon") }
             #if !APPSTORE
-            if def.id == "agent_gemini"        && !HookServer.geminiHooksInstalled() { return CoucouL10n.string("Hooks not installed") }
-            if def.id == "agent_antigravity"   && !HookServer.agyHooksInstalled()    { return CoucouL10n.string("Hooks not installed") }
+            if def.id == "agent_gemini"      && !HookServer.geminiHooksInstalled() { return CoucouL10n.string("Hooks not installed") }
+            if def.id == "agent_antigravity" && !HookServer.agyHooksInstalled()    { return CoucouL10n.string("Hooks not installed") }
+            if def.id == "agent_codex"       && !HookServer.codexHooksInstalled()  { return CoucouL10n.string("Hooks not installed") }
             #endif
             if def.category == .ai {
                 let keyId = def.id == "ai_anthropic" ? "anthropic-api-key"
@@ -977,17 +1026,23 @@ struct SettingsView: View {
                 .font(.system(size: 12))
                 .foregroundColor(atMax ? .secondary : .primary)
             Spacer()
-            if let h = hint {
-                Text(h)
+            if isMain {
+                Text("Main")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
+            } else {
+                if let h = hint {
+                    Text(h)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                Toggle("", isOn: Binding(
+                    get: { isOn },
+                    set: { _ in state.toggleIntegration(def.id) }
+                ))
+                .labelsHidden()
+                .disabled(atMax)
             }
-            Toggle("", isOn: Binding(
-                get: { isOn },
-                set: { _ in state.toggleIntegration(def.id) }
-            ))
-            .labelsHidden()
-            .disabled(atMax)
         }
     }
 }
