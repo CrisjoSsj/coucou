@@ -71,6 +71,9 @@ struct SettingsView: View {
     @State private var n8nWorkflows: [String] = []
     @State private var loadingN8n: Bool = false
 
+    // Chat engine detection in progress
+    @State private var detectingCLIs: Bool = false
+
     // Bindings in minutes for the absence field
     private var absenceMinutes: Binding<Double> {
         Binding(
@@ -83,45 +86,55 @@ struct SettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
 
-                // MARK: API
+                // MARK: Chat engine
+                #if APPSTORE
                 GroupBox("Anthropic API") {
                     VStack(alignment: .leading, spacing: 8) {
-                        SecureField("API key (sk-ant-…)", text: $apiKey)
-                            .textFieldStyle(.roundedBorder)
-                        Button("Save") {
-                            KeychainStore.shared.set("anthropic-api-key", value: apiKey)
-                            statusMessage = "✓ Key saved."
-                        }
-                        .buttonStyle(.borderedProminent)
-
-                        Divider().padding(.vertical, 2)
-
-                        Picker("Model", selection: $modelChoice) {
-                            ForEach(displayModels, id: \.id) { preset in
-                                Text(preset.label).tag(preset.id)
-                            }
-                            Text("Custom…").tag(Self.customModelTag)
-                        }
-                        .onChange(of: modelChoice) { _, choice in
-                            if choice != Self.customModelTag {
-                                state.claudeModel = choice
-                            } else {
-                                applyCustomModel(customModel)
-                            }
-                        }
-
-                        if modelChoice == Self.customModelTag {
-                            TextField("Model ID (e.g. claude-sonnet-4-6)", text: $customModel)
-                                .textFieldStyle(.roundedBorder)
-                                .onChange(of: customModel) { _, value in applyCustomModel(value) }
-                        }
-
-                        Text("Used by the chat. The list comes from your Anthropic account.")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
+                        apiKeyField
                     }
                     .padding(6)
                 }
+                #else
+                GroupBox("Chat") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Who answers in the notch chat. Local CLIs use the login you already have — no API key.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        ForEach(ChatEngine.allCases) { engine in
+                            engineRow(engine)
+                        }
+
+                        HStack(spacing: 8) {
+                            Button("Detect again") {
+                                detectingCLIs = true
+                                Task {
+                                    await state.detectCLIs()
+                                    detectingCLIs = false
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(detectingCLIs)
+                            if detectingCLIs {
+                                ProgressView().controlSize(.small)
+                            }
+                        }
+
+                        if state.chatEngine == .api {
+                            apiKeyField
+                        }
+                    }
+                    .padding(6)
+                }
+                .task {
+                    if !state.cliDetectionDone {
+                        detectingCLIs = true
+                        await state.detectCLIs()
+                        detectingCLIs = false
+                    }
+                }
+                #endif
 
                 GroupBox("Chat — other providers") {
                     VStack(alignment: .leading, spacing: 12) {
@@ -543,6 +556,87 @@ struct SettingsView: View {
             }
         }
         .frame(minWidth: 420, maxWidth: .infinity, minHeight: 320, maxHeight: .infinity)
+    }
+
+    // MARK: - Chat engine
+
+    private var apiKeyField: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SecureField("API key (sk-ant-…)", text: $apiKey)
+                .textFieldStyle(.roundedBorder)
+            Button("Save") {
+                KeychainStore.shared.set("anthropic-api-key", value: apiKey)
+                statusMessage = "✓ Key saved."
+            }
+            .buttonStyle(.borderedProminent)
+
+            Divider().padding(.vertical, 2)
+
+            Picker("Model", selection: $modelChoice) {
+                ForEach(displayModels, id: \.id) { preset in
+                    Text(preset.label).tag(preset.id)
+                }
+                Text("Custom…").tag(Self.customModelTag)
+            }
+            .onChange(of: modelChoice) { _, choice in
+                if choice != Self.customModelTag {
+                    state.claudeModel = choice
+                } else {
+                    applyCustomModel(customModel)
+                }
+            }
+
+            if modelChoice == Self.customModelTag {
+                TextField("Model ID (e.g. claude-sonnet-4-6)", text: $customModel)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: customModel) { _, value in applyCustomModel(value) }
+            }
+
+            Text("Used by the chat. The list comes from your Anthropic account.")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private func engineRow(_ engine: ChatEngine) -> some View {
+        let info = state.detectedCLIs[engine]
+        let available = engine == .api || info != nil
+        let selected = state.chatEngine == engine
+
+        let detail: String
+        if engine == .api {
+            detail = KeychainStore.shared.get("anthropic-api-key") == nil ? "Needs an API key" : "API key saved"
+        } else if let info {
+            detail = [info.version, info.path].compactMap { $0 }.joined(separator: " · ")
+        } else {
+            detail = state.cliDetectionDone ? "Not installed" : "Looking…"
+        }
+
+        return Button {
+            guard !selected else { return }
+            state.chatEngine = engine
+            // A new engine starts a new conversation.
+            ClaudeService.shared.clearConversation()
+            state.chatHistory = []
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: selected ? "largecircle.fill.circle" : "circle")
+                    .foregroundColor(selected ? .accentColor : .secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(engine.label).font(.system(size: 12, weight: .semibold))
+                    Text(detail)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(available ? .secondary : .orange)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!available)
+        .opacity(available ? 1 : 0.55)
     }
 
     // MARK: - Actions
