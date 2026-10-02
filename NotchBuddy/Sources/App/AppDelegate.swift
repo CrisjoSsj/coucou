@@ -111,6 +111,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SpotifyPoller.shared.start()
         NotificationCenter.default.addObserver(self, selector: #selector(openSettings),
                                                name: .openFullSettings, object: nil)
+        #if !APPSTORE
+        _ = MusicController.shared
+        #endif
     }
 
     private func warmClaudeIfNeeded() {
