@@ -212,6 +212,10 @@ final class AppState: ObservableObject {
 
     // Vercel deployments (populated by VercelPoller)
     @Published var vercelDeployments: [VercelDeployment] = []
+    /// The pill event that just opened the notch: a song, a deploy, a payment.
+    @Published var islandNotice: IslandNotice?
+    private var noticeDismissGeneration = 0
+    var skipNextOpenSound = false
 
     // Resend emails (populated by ResendPoller)
     @Published var resendEmails: [ResendEmail] = []
@@ -383,6 +387,64 @@ final class AppState: ObservableObject {
         tasks[idx].pillBadge = nil  // clear badge when user brings task to focus
     }
 
+    /// Quiet Spotify notification: the player itself, then the notch folds back.
+    func revealSpotifyPlayer() {
+        guard pendingApproval == nil else { return }
+        if mode == .expanded, view != .overview, view != .notice { return }
+        if let now = spotifyNow {
+            islandNotice = IslandNotice(
+                pillId: "integration_spotify",
+                status: CoucouL10n.string("Now playing"),
+                headline: now.title,
+                detail: now.artist,
+                isFailure: false
+            )
+        }
+        if mode != .expanded { skipNextOpenSound = true }
+        setFocus("integration_spotify")
+        NotificationCenter.default.post(name: .hookExpand, object: IslandView.notice)
+        noticeDismissGeneration += 1
+        let generation = noticeDismissGeneration
+        let delay = max(autoCloseInterval, 8)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.noticeDismissGeneration == generation else { return }
+            guard self.pendingApproval == nil, self.mode == .expanded, self.view == .notice else { return }
+            guard self.islandNotice?.pillId == "integration_spotify" else { return }
+            NotificationCenter.default.post(name: .islandCollapse, object: nil)
+        }
+    }
+    func presentNotice(pillId: String, status: String, headline: String, detail: String, isFailure: Bool) {
+        islandNotice = IslandNotice(
+            pillId: pillId, status: status, headline: headline, detail: detail, isFailure: isFailure
+        )
+        guard let index = tasks.firstIndex(where: { $0.id == pillId }) else { return }
+        tasks[index].state = isFailure ? .error : .finished
+        tasks[index].steps = [headline]
+        SoundEngine.shared.play(isFailure ? "error" : "finish")
+        NotificationCenter.default.post(
+            name: .triggerEmote,
+            object: isFailure ? BotEmote.surprised : BotEmote.proud
+        )
+        guard pendingApproval == nil else {
+            if focusId != pillId {
+                tasks[index].pillBadge = isFailure ? .error : .finished
+            }
+            return
+        }
+        let wasExpanded = mode == .expanded
+        setFocus(pillId)
+        NotificationCenter.default.post(name: .hookExpand, object: IslandView.notice)
+        guard !wasExpanded else { return }
+        noticeDismissGeneration += 1
+        let generation = noticeDismissGeneration
+        let delay = autoCloseInterval
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.noticeDismissGeneration == generation else { return }
+            guard self.pendingApproval == nil, self.mode == .expanded, self.view == .notice else { return }
+            NotificationCenter.default.post(name: .islandCollapse, object: nil)
+        }
+    }
+
     func syncMode() {
         // If no tasks and not expanded/peek, go hidden
         if tasks.isEmpty && mode == .compact {
@@ -498,6 +560,16 @@ struct ResultItem {
     var url: String?
 }
 
+// MARK: - Pill notice
+
+struct IslandNotice: Equatable {
+    var pillId: String
+    var status: String
+    var headline: String
+    var detail: String
+    var isFailure: Bool
+}
+
 // MARK: - Vercel
 
 struct VercelDeployment: Identifiable {
@@ -523,7 +595,7 @@ struct VercelDeployment: Identifiable {
     }
     var timeAgo: String {
         let diff = Date().timeIntervalSince(createdAt)
-        if diff < 60    { return "just now" }
+        if diff < 60    { return CoucouL10n.string("Just now") }
         if diff < 3600  { return "\(Int(diff/60))m" }
         if diff < 86400 { return "\(Int(diff/3600))h" }
         return "\(Int(diff/86400))d"

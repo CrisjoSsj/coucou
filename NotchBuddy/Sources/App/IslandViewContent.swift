@@ -23,6 +23,7 @@ struct IslandViewContent: View {
         case .searching: SearchingView(state: state)
         case .result:    ResultView(state: state)
         case .note:      NoteView(state: state)
+        case .notice:    DeployNoticeView(state: state)
         case .settings:  SettingsIslandView(state: state)
         case .greeting:  EmptyView()  // GreetingCanvasView overlaid in IslandRootView
         }
@@ -240,7 +241,11 @@ struct ApprovalView: View {
             VStack(alignment: .leading, spacing: 5) {
                 let isQuestion = approval?.tool == "AskUserQuestion"
                 AgentWho(task: state.focusTask, label: isQuestion ? "is asking a question" : "needs permission")
-                CodeBlock(text: approval?.command ?? approval?.tool ?? "…")
+                Text(approval?.command ?? approval?.tool ?? "…")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(Color(hex: "#F5F6F8"))
+                    .lineLimit(2)
+                    .truncationMode(.tail)
                 HStack(spacing: 8) {
                     SecondaryButton("Deny") {
                         HookServer.shared.sendApprovalDecision("deny")
@@ -1289,6 +1294,77 @@ struct ResultView: View {
     }
 }
 
+// MARK: - Deploy notice
+
+struct DeployNoticeView: View {
+    @ObservedObject var state: AppState
+    @State private var popped = false
+
+    var body: some View {
+        let notice = state.islandNotice
+        let failed = notice?.isFailure == true
+        let pillColor = Color(hex: PillCatalog.definition(for: notice?.pillId ?? "")?.color ?? "#F5F6F8")
+        let accent = failed ? Color(hex: "#F4505E") : pillColor
+        ZStack {
+            CardBackground(wash: failed ? .red : .green)
+            if notice?.pillId == "integration_spotify" {
+                SpotifyCardView(inNotice: true)
+            } else {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Circle().fill(pillColor).frame(width: 7, height: 7)
+                    Text(PillCatalog.definition(for: notice?.pillId ?? "")?.name ?? "")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(notice?.status ?? "")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(accent)
+                        .scaleEffect(popped ? 1 : 0.7)
+                        .opacity(popped ? 1 : 0)
+                }
+                Text(notice?.headline ?? "")
+                    .font(.system(size: 16, weight: .semibold))
+                    .lineLimit(1)
+                    .scaleEffect(popped ? 1 : 0.94)
+                    .opacity(popped ? 1 : 0)
+                if let detail = notice?.detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.system(size: 11))
+                        .foregroundColor(Color(hex: "#C5C8CD"))
+                        .lineLimit(1)
+                }
+                HStack(spacing: 8) {
+                    SecondaryButton("Show it") { state.view = .overview }
+                    PrimaryButton("OK") {
+                        NotificationCenter.default.post(name: .islandCollapse, object: nil)
+                    }
+                }
+            }
+            .padding(.leading, 116)
+            .padding(.trailing, 16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .onChange(of: state.view) { _, view in
+            guard view == .notice else { return }
+            playPop()
+        }
+        .onChange(of: state.islandNotice?.headline) { _, _ in
+            guard state.view == .notice else { return }
+            playPop()
+        }
+        .onAppear {
+            if state.view == .notice { playPop() }
+        }
+    }
+
+    private func playPop() {
+        popped = false
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.58).delay(0.12)) {
+            popped = true
+        }
+    }
+}
+
 // MARK: - Note (short message, auto-closes)
 
 struct NoteView: View {
@@ -1307,17 +1383,12 @@ struct NoteView: View {
 }
 
 struct SpotifyCardView: View {
+    var inNotice: Bool = false
     @ObservedObject private var state = AppState.shared
 
     var body: some View {
         let _ = state.appLanguage
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Circle().fill(Color(hex: "#1DB954")).frame(width: 7, height: 7)
-                Text("Spotify")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(Color(hex: "#F5F6F8"))
-            }
+        VStack(alignment: .leading, spacing: 4) {
             if let now = state.spotifyNow {
                 TimelineView(.periodic(from: .now, by: now.isPlaying ? 0.5 : 30)) { context in
                     playing(now, at: context.date)
@@ -1328,16 +1399,43 @@ struct SpotifyCardView: View {
                     .foregroundColor(Color(hex: "#8E939C"))
             }
         }
-        .padding(.top, 6)
-        .padding(.leading, 108)
-        .padding(.trailing, 14)
+        .padding(.top, inNotice ? 0 : 2)
+        .padding(.leading, inNotice ? 116 : 108)
+        .padding(.trailing, inNotice ? 18 : 12)
     }
 
+    @ViewBuilder
     private func playing(_ now: SpotifyNow, at date: Date) -> some View {
         let elapsed = now.elapsed(at: date)
-        return VStack(alignment: .leading, spacing: 5) {
+        if inNotice {
+            noticeRow(now, elapsed: elapsed)
+        } else {
+            compactRow(now, elapsed: elapsed)
+        }
+    }
+
+    private func noticeRow(_ now: SpotifyNow, elapsed: TimeInterval) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            artwork(now.artworkURL, side: 80)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(now.title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(Color(hex: "#F5F6F8"))
+                    .lineLimit(1)
+                Text(now.artist)
+                    .font(.system(size: 12))
+                    .foregroundColor(Color(hex: "#8E939C"))
+                    .lineLimit(1)
+                progress(elapsed: elapsed, duration: now.duration)
+                controls(now)
+            }
+        }
+    }
+
+    private func compactRow(_ now: SpotifyNow, elapsed: TimeInterval) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 8) {
-                artwork(now.artworkURL)
+                artwork(now.artworkURL, side: 46)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(now.title)
                         .font(.system(size: 12, weight: .semibold))
@@ -1372,14 +1470,14 @@ struct SpotifyCardView: View {
         }
     }
 
-    private func artwork(_ url: URL?) -> some View {
+    private func artwork(_ url: URL?, side: CGFloat) -> some View {
         AsyncImage(url: url) { image in
             image.resizable().scaledToFill()
         } placeholder: {
             Color.white.opacity(0.08)
         }
-        .frame(width: 32, height: 32)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .frame(width: side, height: side)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     private func controls(_ now: SpotifyNow) -> some View {
@@ -1400,7 +1498,7 @@ struct SpotifyCardView: View {
                 SpotifyPoller.shared.command(.repeatPlayback)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .center)
+        .frame(maxWidth: .infinity, alignment: inNotice ? .leading : .center)
     }
 
     private func spotifyButton(
@@ -3370,20 +3468,6 @@ struct AgentWho: View {
             }
             Text(CoucouL10n.string(label)).font(.system(size: 12)).foregroundColor(Color(hex: "#8E939C"))
         }
-    }
-}
-
-struct CodeBlock: View {
-    let text: String
-
-    var body: some View {
-        Text(text)
-            .font(.system(size: 12, design: .monospaced))
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(Color.white.opacity(0.07))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.white.opacity(0.06)))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .foregroundColor(Color(hex: "#E8E9EC"))
     }
 }
 

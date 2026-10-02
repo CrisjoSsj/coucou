@@ -4,6 +4,8 @@ import Foundation
 final class SpotifyPoller: @unchecked Sendable {
     static let shared = SpotifyPoller()
     private var timer: DispatchSourceTimer?
+    private var knownTrack = ""
+    private var hasTrackBaseline = false
     private init() {}
 
     func start() {
@@ -50,7 +52,22 @@ final class SpotifyPoller: @unchecked Sendable {
         }
         guard enabled else { return }
         let now = Self.parse(Self.run(Self.nowPlayingScript))
-        DispatchQueue.main.async { AppState.shared.spotifyNow = now }
+        Task { @MainActor in self.publish(now) }
+    }
+
+    @MainActor
+    private func publish(_ now: SpotifyNow?) {
+        AppState.shared.spotifyNow = now
+        guard let now else { return }
+        let key = now.title + "\n" + now.artist
+        if !hasTrackBaseline {
+            hasTrackBaseline = true
+            knownTrack = key
+            return
+        }
+        guard key != knownTrack else { return }
+        knownTrack = key
+        AppState.shared.revealSpotifyPlayer()
     }
 
     private static let nowPlayingScript = """

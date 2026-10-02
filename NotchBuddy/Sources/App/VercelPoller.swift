@@ -11,7 +11,6 @@ final class VercelPoller: @unchecked Sendable {
     private var didBaseline = false
     private var seenStates: [String: String] = [:]
     private var noticeGeneration = 0
-    private var dismissGeneration = 0
     private var cachedTeamIds: [String] = []
     private var teamsFetchedAt = Date.distantPast
 
@@ -195,7 +194,7 @@ final class VercelPoller: @unchecked Sendable {
         guard let idx = appState.tasks.firstIndex(where: { $0.id == "integration_vercel" }) else { return }
 
         if let hot {
-            show(hot, on: appState, taskIndex: idx)
+            show(hot, on: appState)
         } else if let building = visible.first(where: \.isInProgress) {
             markBuilding(building, on: appState, taskIndex: idx)
         } else if appState.tasks[idx].state == .working {
@@ -212,34 +211,16 @@ final class VercelPoller: @unchecked Sendable {
     }
 
     @MainActor
-    private func show(_ deployment: VercelDeployment, on appState: AppState, taskIndex: Int) {
+    private func show(_ deployment: VercelDeployment, on appState: AppState) {
         let failed = deployment.state == "ERROR"
-        appState.tasks[taskIndex].state = failed ? .error : .finished
-        appState.tasks[taskIndex].steps = [deployment.projectName]
-        SoundEngine.shared.play(failed ? "error" : "finish")
-
-        if appState.pendingApproval == nil {
-            let wasExpanded = appState.mode == .expanded
-            appState.setFocus("integration_vercel")
-            NotificationCenter.default.post(name: .hookExpand, object: IslandView.overview)
-            if !wasExpanded { scheduleDismiss() }
-        } else if appState.focusId != "integration_vercel" {
-            appState.tasks[taskIndex].pillBadge = failed ? .error : .finished
-        }
+        appState.presentNotice(
+            pillId: "integration_vercel",
+            status: CoucouL10n.string(failed ? "Deploy failed" : "Deploy ready"),
+            headline: deployment.projectName,
+            detail: deployment.commitMessage ?? "",
+            isFailure: failed
+        )
         scheduleIdleReset()
-    }
-
-    @MainActor
-    private func scheduleDismiss() {
-        dismissGeneration += 1
-        let generation = dismissGeneration
-        let delay = AppState.shared.autoCloseInterval
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            guard self.dismissGeneration == generation else { return }
-            let state = AppState.shared
-            guard state.pendingApproval == nil, state.mode == .expanded, state.view == .overview else { return }
-            NotificationCenter.default.post(name: .islandCollapse, object: nil)
-        }
     }
 
     @MainActor

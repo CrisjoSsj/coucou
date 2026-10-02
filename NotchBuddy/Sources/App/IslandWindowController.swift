@@ -345,7 +345,10 @@ final class IslandWindowController: NSWindowController {
             ? .timingCurve(0.45, 0, 0.2, 1, duration: 0.34)
             : .spring(response: 0.5, dampingFraction: 0.72)
         withAnimation(anim) { state.mode = mode }
-        if mode == .expanded { SoundEngine.shared.play("open") }
+        if mode == .expanded {
+            if state.skipNextOpenSound { state.skipNextOpenSound = false }
+            else { SoundEngine.shared.play("open") }
+        }
         if prev == .expanded {
             SoundEngine.shared.play("close")
             if fsm.isHeldOpen?() != true { state.isPinned = false }
