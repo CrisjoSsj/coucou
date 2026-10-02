@@ -2,6 +2,21 @@ import SwiftUI
 import ServiceManagement
 import AppKit
 
+private enum SettingsPage: String, CaseIterable, Identifiable {
+    case notch, chat, hooks, services
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .notch: return "Notch"
+        case .chat: return "Chat"
+        case .hooks: return "Hooks"
+        case .services: return "Services"
+        }
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject private var state = AppState.shared
     @State private var apiKey: String = KeychainStore.shared.get("anthropic-api-key") ?? ""
@@ -73,6 +88,7 @@ struct SettingsView: View {
 
     // Chat engine detection in progress
     @State private var detectingCLIs: Bool = false
+    @State private var settingsPage: SettingsPage = .notch
 
     // Bindings in minutes for the absence field
     private var absenceMinutes: Binding<Double> {
@@ -83,21 +99,176 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        ScrollView {
+        VStack(spacing: 0) {
+            Picker(CoucouL10n.string("Section"), selection: $settingsPage) {
+                ForEach(SettingsPage.allCases) { page in
+                    Text(CoucouL10n.string(page.title)).tag(page)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 20)
+            .padding(.top, 16)
+            .padding(.bottom, 8)
+
+            ScrollView {
             VStack(alignment: .leading, spacing: 18) {
 
+                if settingsPage == .notch {
+                GroupBox(CoucouL10n.string("Language")) {
+                    Picker(CoucouL10n.string("Language"), selection: $state.appLanguage) {
+                        Text(CoucouL10n.string("English")).tag(AppLanguage.en)
+                        Text(CoucouL10n.string("Español")).tag(AppLanguage.es)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .padding(6)
+                }
+
+                // MARK: Active pills
+                GroupBox(CoucouL10n.string("Active pills")) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        // VS Code: always active (mirrors main branch row exactly)
+                        HStack {
+                            Text("VS Code")
+                                .font(.system(size: 12, weight: .semibold))
+                            Circle().fill(Color(hex: "#F5F6F8")).frame(width: 8, height: 8)
+                            Spacer()
+                            Text(CoucouL10n.string("Always active"))
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+
+                        Divider()
+
+                        Text(CoucouL10n.string("Choose the tools you use. Coucou only shows what you declare here."))
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+
+                        Text(CoucouL10n.format("%d/4 slots used", state.activeIntegrations.count))
+                            .font(.system(size: 11))
+                            .foregroundColor(state.activeIntegrations.count >= 4 ? .orange : .secondary)
+
+                        // Main pill picker: shown only when a workspace pill (Cursor/Codex) is active
+                        let workspacePills = PillCatalog.available.filter {
+                            $0.category == .workspace && $0.id != "integration_claude"
+                                && state.activeIntegrations.contains($0.id)
+                        }
+                        if !workspacePills.isEmpty {
+                            Picker(CoucouL10n.string("Main pill"), selection: $state.mainPillId) {
+                                Text("VS Code").tag("integration_claude")
+                                ForEach(workspacePills, id: \.id) { def in
+                                    Text(def.name).tag(def.id)
+                                }
+                            }
+                            .onChange(of: state.mainPillId) { _, newId in
+                                state.setFocus(newId)
+                            }
+                        }
+
+                        // Categories — integration_claude excluded (shown above)
+                        ForEach(PillCategory.allCases, id: \.self) { cat in
+                            let catPills = PillCatalog.available.filter {
+                                $0.category == cat && $0.id != "integration_claude"
+                            }
+                            if !catPills.isEmpty {
+                                Divider()
+                                Text(CoucouL10n.string(cat.title))
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(.secondary)
+                                ForEach(catPills, id: \.id) { def in
+                                    pillRow(def)
+                                }
+                            }
+                        }
+                    }
+                    .padding(6)
+                }
+
+                // MARK: Timings
+                GroupBox(CoucouL10n.string("Behavior")) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle(CoucouL10n.string("Occasional idle glances"), isOn: $state.idleAnimationsEnabled)
+                        Text(CoucouL10n.string("Mochi occasionally looks around and blinks while resting. Respects Reduce Motion."))
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        HStack(spacing: 8) {
+                            Text(CoucouL10n.string("Close after"))
+                            TextField("60", value: $state.autoCloseInterval, format: .number)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 64)
+                            Text(CoucouL10n.string("s inactive"))
+                        }
+                        HStack(spacing: 8) {
+                            Text(CoucouL10n.string("Hide after"))
+                            TextField("3", value: absenceMinutes, format: .number)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 48)
+                            Text(CoucouL10n.string("min without movement"))
+                        }
+                    }
+                    .padding(6)
+                }
+
+                // MARK: Son
+                GroupBox(CoucouL10n.string("Sound")) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle(CoucouL10n.string("Enable sounds"), isOn: $state.soundEnabled)
+                        HStack(spacing: 8) {
+                            Text(CoucouL10n.string("Volume"))
+                                .frame(width: 56, alignment: .leading)
+                            Slider(value: $state.soundVolume, in: 0...0.2)
+                                .disabled(!state.soundEnabled)
+                            Text("\(Int(state.soundVolume / 0.2 * 100)) %")
+                                .frame(width: 36, alignment: .trailing)
+                                .monospacedDigit()
+                        }
+                    }
+                    .padding(6)
+                }
+
+                // MARK: Hotkey
+                GroupBox(CoucouL10n.string("Hotkey")) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle(CoucouL10n.string("Show island with shortcut"), isOn: $state.hotkeyEnabled)
+                        if state.hotkeyEnabled {
+                            HStack(spacing: 8) {
+                                Text(CoucouL10n.string("Shortcut"))
+                                    .frame(width: 70, alignment: .leading)
+                                ShortcutRecorderButton(flags: $hotkeyFlags, code: $hotkeyCode)
+                                    .onChange(of: hotkeyFlags) { _, v in state.hotkeyFlags = v }
+                                    .onChange(of: hotkeyCode)  { _, v in state.hotkeyCode  = v }
+                                Text(CoucouL10n.string("presses this → island opens"))
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .padding(6)
+                }
+
+                // MARK: Startup
+                GroupBox(CoucouL10n.string("Startup")) {
+                    Toggle(CoucouL10n.string("Launch at Mac startup"), isOn: $launchAtStartup)
+                        .onChange(of: launchAtStartup) { _, on in toggleStartup(on) }
+                        .padding(6)
+                }
+
+                } // notch
+
+                if settingsPage == .chat {
                 // MARK: Chat engine
                 #if APPSTORE
-                GroupBox("Anthropic API") {
+                GroupBox(CoucouL10n.string("Anthropic API")) {
                     VStack(alignment: .leading, spacing: 8) {
                         apiKeyField
                     }
                     .padding(6)
                 }
                 #else
-                GroupBox("Chat") {
+                GroupBox(CoucouL10n.string("Chat")) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Who answers in the notch chat. Local CLIs use the login you already have — no API key.")
+                        Text(CoucouL10n.string("Who answers in the notch chat. Local CLIs use the login you already have — no API key."))
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -107,7 +278,7 @@ struct SettingsView: View {
                         }
 
                         HStack(spacing: 8) {
-                            Button("Detect again") {
+                            Button(CoucouL10n.string("Detect again")) {
                                 detectingCLIs = true
                                 Task {
                                     await state.detectCLIs()
@@ -136,9 +307,10 @@ struct SettingsView: View {
                 }
                 #endif
 
-                GroupBox("Chat — other providers") {
+                if state.chatEngine == .api {
+                GroupBox(CoucouL10n.string("Chat — other providers")) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("To use Google Gemini or OpenAI from the chat. Keys are stored in the Keychain.")
+                        Text(CoucouL10n.string("To use Google Gemini or OpenAI from the chat. Keys are stored in the Keychain."))
                             .font(.system(size: 12))
                             .foregroundColor(.secondary)
 
@@ -148,7 +320,7 @@ struct SettingsView: View {
                         }
                         SecureField("API key (AI Studio)", text: $googleKey)
                             .textFieldStyle(.roundedBorder)
-                        Button("Save") {
+                        Button(CoucouL10n.string("Save")) {
                             KeychainStore.shared.set("google-api-key", value: googleKey)
                             statusMessage = "✓ Google key saved."
                         }
@@ -162,7 +334,7 @@ struct SettingsView: View {
                         }
                         SecureField("API key (sk-…)", text: $openAIKey)
                             .textFieldStyle(.roundedBorder)
-                        Button("Save") {
+                        Button(CoucouL10n.string("Save")) {
                             KeychainStore.shared.set("openai-api-key", value: openAIKey)
                             statusMessage = "✓ OpenAI key saved."
                         }
@@ -170,22 +342,25 @@ struct SettingsView: View {
                     }
                     .padding(.vertical, 4)
                 }
+                }
+                } // chat
 
+                if settingsPage == .hooks {
                 // MARK: Hooks
-                GroupBox("Claude Code Hooks") {
+                GroupBox(CoucouL10n.string("Claude Code Hooks")) {
                     VStack(alignment: .leading, spacing: 10) {
                         if hookNeedsUpdate {
                             HStack(spacing: 6) {
                                 Image(systemName: "exclamationmark.triangle.fill")
                                     .foregroundColor(.orange)
-                                Text("Hook timeout outdated — update to fix approvals")
+                                Text(CoucouL10n.string("Hook timeout outdated — update to fix approvals"))
                                     .font(.system(size: 11))
                                     .foregroundColor(.orange)
                             }
                             #if APPSTORE
-                            Button("Update hooks") { installHooksAppStore() }
+                            Button(CoucouL10n.string("Update hooks")) { installHooksAppStore() }
                             #else
-                            Button("Update hooks") { installHooks() }
+                            Button(CoucouL10n.string("Update hooks")) { installHooks() }
                             #endif
                         }
                         #if APPSTORE
@@ -193,9 +368,9 @@ struct SettingsView: View {
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(.secondary)
                         HStack(spacing: 10) {
-                            Button("Install hooks") { installHooksAppStore() }
+                            Button(CoucouL10n.string("Install hooks")) { installHooksAppStore() }
                                 .buttonStyle(.borderedProminent)
-                            Button("Uninstall") { uninstallHooksAppStore() }
+                            Button(CoucouL10n.string("Uninstall")) { uninstallHooksAppStore() }
                                 .buttonStyle(.bordered)
                         }
                         #else
@@ -203,9 +378,9 @@ struct SettingsView: View {
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(.secondary)
                         HStack(spacing: 10) {
-                            Button("Install hooks") { installHooks() }
+                            Button(CoucouL10n.string("Install hooks")) { installHooks() }
                                 .buttonStyle(.borderedProminent)
-                            Button("Uninstall") { uninstallHooks() }
+                            Button(CoucouL10n.string("Uninstall")) { uninstallHooks() }
                                 .buttonStyle(.bordered)
                         }
                         #endif
@@ -222,9 +397,9 @@ struct SettingsView: View {
                             .cornerRadius(6)
 
                             HStack {
-                                Button("Confirm & write") { confirmInstall() }
+                                Button(CoucouL10n.string("Confirm & write")) { confirmInstall() }
                                     .buttonStyle(.borderedProminent)
-                                Button("Cancel") { showDiff = false; pendingHookJSON = "" }
+                                Button(CoucouL10n.string("Cancel")) { showDiff = false; pendingHookJSON = "" }
                                     .buttonStyle(.bordered)
                             }
                         }
@@ -235,7 +410,8 @@ struct SettingsView: View {
 
                 // MARK: Gemini CLI Hooks / Antigravity Hooks
                 #if !APPSTORE
-                GroupBox("Gemini CLI Hooks") {
+                if state.activeIntegrations.contains("agent_gemini") {
+                GroupBox(CoucouL10n.string("Gemini CLI Hooks")) {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(geminiHooksInstalled
                              ? "Hooks installed — restart Gemini CLI to activate"
@@ -243,9 +419,9 @@ struct SettingsView: View {
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(.secondary)
                         HStack(spacing: 10) {
-                            Button("Install hooks") { triggerGeminiPreview(install: true) }
+                            Button(CoucouL10n.string("Install hooks")) { triggerGeminiPreview(install: true) }
                                 .buttonStyle(.borderedProminent)
-                            Button("Uninstall") { triggerGeminiPreview(install: false) }
+                            Button(CoucouL10n.string("Uninstall")) { triggerGeminiPreview(install: false) }
                                 .buttonStyle(.bordered)
                         }
                         if showGeminiDiff {
@@ -258,17 +434,19 @@ struct SettingsView: View {
                             .background(Color(NSColor.textBackgroundColor))
                             .cornerRadius(6)
                             HStack {
-                                Button("Confirm & write") { confirmGeminiOp() }
+                                Button(CoucouL10n.string("Confirm & write")) { confirmGeminiOp() }
                                     .buttonStyle(.borderedProminent)
-                                Button("Cancel") { showGeminiDiff = false; pendingGeminiJSON = "" }
+                                Button(CoucouL10n.string("Cancel")) { showGeminiDiff = false; pendingGeminiJSON = "" }
                                     .buttonStyle(.bordered)
                             }
                         }
                     }
                     .padding(6)
                 }
+                }
 
-                GroupBox("Antigravity Hooks") {
+                if state.activeIntegrations.contains("agent_antigravity") {
+                GroupBox(CoucouL10n.string("Antigravity Hooks")) {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(agyHooksInstalled
                              ? "Hooks installed — restart Antigravity to activate"
@@ -276,9 +454,9 @@ struct SettingsView: View {
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(.secondary)
                         HStack(spacing: 10) {
-                            Button("Install hooks") { triggerAgyPreview(install: true) }
+                            Button(CoucouL10n.string("Install hooks")) { triggerAgyPreview(install: true) }
                                 .buttonStyle(.borderedProminent)
-                            Button("Uninstall") { triggerAgyPreview(install: false) }
+                            Button(CoucouL10n.string("Uninstall")) { triggerAgyPreview(install: false) }
                                 .buttonStyle(.bordered)
                         }
                         if showAgyDiff {
@@ -291,22 +469,31 @@ struct SettingsView: View {
                             .background(Color(NSColor.textBackgroundColor))
                             .cornerRadius(6)
                             HStack {
-                                Button("Confirm & write") { confirmAgyOp() }
+                                Button(CoucouL10n.string("Confirm & write")) { confirmAgyOp() }
                                     .buttonStyle(.borderedProminent)
-                                Button("Cancel") { showAgyDiff = false; pendingAgyJSON = "" }
+                                Button(CoucouL10n.string("Cancel")) { showAgyDiff = false; pendingAgyJSON = "" }
                                     .buttonStyle(.bordered)
                             }
                         }
                     }
                     .padding(6)
                 }
+                }
                 #endif
 
-                // MARK: Integrations
-                GroupBox("Integrations") {
-                    VStack(alignment: .leading, spacing: 14) {
+                } // hooks
 
-                        // Resend
+                if settingsPage == .services {
+                if state.activeIntegrations.contains(where: {
+                    $0.hasPrefix("integration_") && $0 != "integration_claude"
+                }) {
+                GroupBox(CoucouL10n.string("Integrations")) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text(CoucouL10n.string("Keys for the services you turned on in Notch."))
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+
+                        if state.activeIntegrations.contains("integration_resend") {
                         VStack(alignment: .leading, spacing: 5) {
                             HStack(spacing: 6) {
                                 Circle().fill(Color(hex: "#22C55E")).frame(width: 8, height: 8)
@@ -314,17 +501,18 @@ struct SettingsView: View {
                             }
                             SecureField("API key  (re_…)", text: $resendKey)
                                 .textFieldStyle(.roundedBorder)
-                            TextField("From address  (you@yourdomain.com)", text: $resendFrom)
+                            TextField(CoucouL10n.string("From address  (you@yourdomain.com)"), text: $resendFrom)
                                 .textFieldStyle(.roundedBorder)
                         }
+                        }
 
-                        // n8n
+                        if state.activeIntegrations.contains("integration_n8n") {
                         VStack(alignment: .leading, spacing: 5) {
                             HStack(spacing: 6) {
                                 Circle().fill(Color(hex: "#F29B38")).frame(width: 8, height: 8)
                                 Text("n8n").font(.system(size: 12, weight: .semibold))
                             }
-                            TextField("Instance URL  (https://…)", text: $n8nUrl)
+                            TextField(CoucouL10n.string("Instance URL  (https://…)"), text: $n8nUrl)
                                 .textFieldStyle(.roundedBorder)
                             SecureField("API key", text: $n8nKey)
                                 .textFieldStyle(.roundedBorder)
@@ -336,14 +524,15 @@ struct SettingsView: View {
                                 onLoad: loadN8nWorkflows
                             )
                         }
+                        }
 
-                        // Vercel
+                        if state.activeIntegrations.contains("integration_vercel") {
                         VStack(alignment: .leading, spacing: 5) {
                             HStack(spacing: 6) {
                                 Circle().fill(Color(hex: "#7C5CFF")).frame(width: 8, height: 8)
                                 Text("Vercel").font(.system(size: 12, weight: .semibold))
                             }
-                            SecureField("Token", text: $vercelToken)
+                            SecureField(CoucouL10n.string("Token"), text: $vercelToken)
                                 .textFieldStyle(.roundedBorder)
                             IntegrationFilterRow(
                                 label: "Projects",
@@ -353,28 +542,31 @@ struct SettingsView: View {
                                 onLoad: loadVercelProjects
                             )
                         }
+                        }
 
-                        // GitHub
+                        if state.activeIntegrations.contains("integration_github") {
                         VStack(alignment: .leading, spacing: 5) {
                             HStack(spacing: 6) {
                                 Circle().fill(Color(hex: "#F4505E")).frame(width: 8, height: 8)
                                 Text("GitHub").font(.system(size: 12, weight: .semibold))
                             }
-                            SecureField("Personal Access Token", text: $githubToken)
+                            SecureField(CoucouL10n.string("Personal Access Token"), text: $githubToken)
                                 .textFieldStyle(.roundedBorder)
                         }
+                        }
 
-                        // Stripe
+                        if state.activeIntegrations.contains("integration_stripe") {
                         VStack(alignment: .leading, spacing: 5) {
                             HStack(spacing: 6) {
                                 Circle().fill(Color(hex: "#0570DE")).frame(width: 8, height: 8)
                                 Text("Stripe").font(.system(size: 12, weight: .semibold))
                             }
-                            SecureField("Secret key  (sk_live_… or sk_test_…)", text: $stripeKey)
+                            SecureField(CoucouL10n.string("Secret key  (sk_live_… or sk_test_…)"), text: $stripeKey)
                                 .textFieldStyle(.roundedBorder)
                         }
+                        }
 
-                        // Cal.com
+                        if state.activeIntegrations.contains("integration_calcom") {
                         VStack(alignment: .leading, spacing: 5) {
                             HStack(spacing: 6) {
                                 Circle().fill(Color(hex: "#C9956A")).frame(width: 8, height: 8)
@@ -383,148 +575,30 @@ struct SettingsView: View {
                             SecureField("API key  (cal_live_…)", text: $calcomKey)
                                 .textFieldStyle(.roundedBorder)
                         }
+                        }
 
-                        // Notion
+                        if state.activeIntegrations.contains("integration_notion") {
                         VStack(alignment: .leading, spacing: 5) {
                             HStack(spacing: 6) {
                                 Circle().fill(Color(hex: "#E8E8E8")).frame(width: 8, height: 8)
                                 Text("Notion").font(.system(size: 12, weight: .semibold))
                             }
-                            SecureField("Integration token  (secret_…)", text: $notionKey)
+                            SecureField(CoucouL10n.string("Integration token  (secret_…)"), text: $notionKey)
                                 .textFieldStyle(.roundedBorder)
                         }
+                        }
 
-                        Button("Save integrations") { saveIntegrations() }
+                        Button(CoucouL10n.string("Save integrations")) { saveIntegrations() }
                             .buttonStyle(.borderedProminent)
                     }
                     .padding(6)
                 }
-
-                // MARK: Son
-                GroupBox("Sound") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Toggle("Enable sounds", isOn: $state.soundEnabled)
-                        HStack(spacing: 8) {
-                            Text("Volume")
-                                .frame(width: 56, alignment: .leading)
-                            Slider(value: $state.soundVolume, in: 0...0.2)
-                                .disabled(!state.soundEnabled)
-                            Text("\(Int(state.soundVolume / 0.2 * 100)) %")
-                                .frame(width: 36, alignment: .trailing)
-                                .monospacedDigit()
-                        }
-                    }
-                    .padding(6)
+                } else {
+                    Text(CoucouL10n.string("Turn a service on in Notch. Its key shows up here."))
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
                 }
-
-                // MARK: Timings
-                GroupBox("Behavior") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 8) {
-                            Text("Close after")
-                            TextField("60", value: $state.autoCloseInterval, format: .number)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 64)
-                            Text("s inactive")
-                        }
-                        HStack(spacing: 8) {
-                            Text("Hide after")
-                            TextField("3", value: absenceMinutes, format: .number)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 48)
-                            Text("min without movement")
-                        }
-                    }
-                    .padding(6)
-                }
-
-                // MARK: Active pills
-                GroupBox("Active pills") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        // VS Code: always active (mirrors main branch row exactly)
-                        HStack {
-                            Text("VS Code")
-                                .font(.system(size: 12, weight: .semibold))
-                            Circle().fill(Color(hex: "#F5F6F8")).frame(width: 8, height: 8)
-                            Spacer()
-                            Text("Always active")
-                                .font(.system(size: 11))
-                                .foregroundColor(.secondary)
-                        }
-
-                        Divider()
-
-                        Text("Choose the tools you use. Coucou only shows what you declare here.")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-
-                        Text("\(state.activeIntegrations.count)/4 slots used")
-                            .font(.system(size: 11))
-                            .foregroundColor(state.activeIntegrations.count >= 4 ? .orange : .secondary)
-
-                        // Main pill picker: shown only when a workspace pill (Cursor/Codex) is active
-                        let workspacePills = PillCatalog.available.filter {
-                            $0.category == .workspace && $0.id != "integration_claude"
-                                && state.activeIntegrations.contains($0.id)
-                        }
-                        if !workspacePills.isEmpty {
-                            Picker("Main pill", selection: $state.mainPillId) {
-                                Text("VS Code").tag("integration_claude")
-                                ForEach(workspacePills, id: \.id) { def in
-                                    Text(def.name).tag(def.id)
-                                }
-                            }
-                            .onChange(of: state.mainPillId) { _, newId in
-                                state.setFocus(newId)
-                            }
-                        }
-
-                        // Categories — integration_claude excluded (shown above)
-                        ForEach(PillCategory.allCases, id: \.self) { cat in
-                            let catPills = PillCatalog.available.filter {
-                                $0.category == cat && $0.id != "integration_claude"
-                            }
-                            if !catPills.isEmpty {
-                                Divider()
-                                Text(cat.title)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundColor(.secondary)
-                                ForEach(catPills, id: \.id) { def in
-                                    pillRow(def)
-                                }
-                            }
-                        }
-                    }
-                    .padding(6)
-                }
-
-                // MARK: Hotkey
-                GroupBox("Hotkey") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Toggle("Show island with shortcut", isOn: $state.hotkeyEnabled)
-                        if state.hotkeyEnabled {
-                            HStack(spacing: 8) {
-                                Text("Shortcut")
-                                    .frame(width: 70, alignment: .leading)
-                                ShortcutRecorderButton(flags: $hotkeyFlags, code: $hotkeyCode)
-                                    .onChange(of: hotkeyFlags) { _, v in state.hotkeyFlags = v }
-                                    .onChange(of: hotkeyCode)  { _, v in state.hotkeyCode  = v }
-                                Text("presses this → island opens")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                    }
-                    .padding(6)
-                }
-
-                // MARK: Startup
-                GroupBox("Startup") {
-                    Toggle("Launch at Mac startup", isOn: $launchAtStartup)
-                        .onChange(of: launchAtStartup) { _, on in toggleStartup(on) }
-                        .padding(6)
-                }
-
+                } // services
                 if !statusMessage.isEmpty {
                     Text(statusMessage)
                         .font(.system(size: 12))
@@ -556,6 +630,8 @@ struct SettingsView: View {
             }
         }
         .frame(minWidth: 420, maxWidth: .infinity, minHeight: 320, maxHeight: .infinity)
+        .id(state.appLanguage)
+        }
     }
 
     // MARK: - Chat engine
@@ -564,7 +640,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             SecureField("API key (sk-ant-…)", text: $apiKey)
                 .textFieldStyle(.roundedBorder)
-            Button("Save") {
+            Button(CoucouL10n.string("Save")) {
                 KeychainStore.shared.set("anthropic-api-key", value: apiKey)
                 statusMessage = "✓ Key saved."
             }
@@ -572,11 +648,11 @@ struct SettingsView: View {
 
             Divider().padding(.vertical, 2)
 
-            Picker("Model", selection: $modelChoice) {
+            Picker(CoucouL10n.string("Model"), selection: $modelChoice) {
                 ForEach(displayModels, id: \.id) { preset in
                     Text(preset.label).tag(preset.id)
                 }
-                Text("Custom…").tag(Self.customModelTag)
+                Text(CoucouL10n.string("Custom…")).tag(Self.customModelTag)
             }
             .onChange(of: modelChoice) { _, choice in
                 if choice != Self.customModelTag {
@@ -587,12 +663,12 @@ struct SettingsView: View {
             }
 
             if modelChoice == Self.customModelTag {
-                TextField("Model ID (e.g. claude-sonnet-4-6)", text: $customModel)
+                TextField(CoucouL10n.string("Model ID (e.g. claude-sonnet-4-6)"), text: $customModel)
                     .textFieldStyle(.roundedBorder)
                     .onChange(of: customModel) { _, value in applyCustomModel(value) }
             }
 
-            Text("Used by the chat. The list comes from your Anthropic account.")
+            Text(CoucouL10n.string("Used by the chat. The list comes from your Anthropic account."))
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
         }
@@ -827,24 +903,11 @@ struct SettingsView: View {
             return
         }
         loadingVercel = true
-        guard let url = URL(string: "https://api.vercel.com/v9/projects?limit=100") else { return }
-        var req = URLRequest(url: url, timeoutInterval: 10)
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        URLSession.shared.dataTask(with: req) { data, response, _ in
-            let names: [String]
-            if let data,
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let projects = json["projects"] as? [[String: Any]] {
-                names = projects.compactMap { $0["name"] as? String }.sorted()
-            } else {
-                names = []
-            }
-            DispatchQueue.main.async {
-                self.vercelProjects = names
-                self.loadingVercel = false
-                if names.isEmpty { self.statusMessage = "❌ No Vercel projects found." }
-            }
-        }.resume()
+        VercelPoller.fetchProjectNames(token: token) { names in
+            self.vercelProjects = names
+            self.loadingVercel = false
+            if names.isEmpty { self.statusMessage = "❌ No Vercel projects found." }
+        }
     }
 
     // MARK: - n8n workflow list
@@ -894,15 +957,15 @@ struct SettingsView: View {
         let atMax = state.activeIntegrations.count >= 4 && !isOn
         // Status hint: shown in 11pt gray before the toggle
         let hint: String? = {
-            if def.comingSoon { return "Coming soon" }
+            if def.comingSoon { return CoucouL10n.string("Coming soon") }
             #if !APPSTORE
-            if def.id == "agent_gemini"        && !HookServer.geminiHooksInstalled() { return "Hooks not installed" }
-            if def.id == "agent_antigravity"   && !HookServer.agyHooksInstalled()    { return "Hooks not installed" }
+            if def.id == "agent_gemini"        && !HookServer.geminiHooksInstalled() { return CoucouL10n.string("Hooks not installed") }
+            if def.id == "agent_antigravity"   && !HookServer.agyHooksInstalled()    { return CoucouL10n.string("Hooks not installed") }
             #endif
             if def.category == .ai {
                 let keyId = def.id == "ai_anthropic" ? "anthropic-api-key"
                            : def.id == "ai_google"    ? "google-api-key" : "openai-api-key"
-                if KeychainStore.shared.get(keyId) == nil { return "Key not configured" }
+                if KeychainStore.shared.get(keyId) == nil { return CoucouL10n.string("Key not configured") }
             }
             return nil
         }()
@@ -953,7 +1016,7 @@ struct IntegrationFilterRow: View {
                         .controlSize(.mini)
                 }
                 if !filter.isEmpty {
-                    Button("Clear") { filter = [] }
+                    Button(CoucouL10n.string("Clear")) { filter = [] }
                         .buttonStyle(.bordered)
                         .controlSize(.mini)
                         .foregroundColor(.secondary)

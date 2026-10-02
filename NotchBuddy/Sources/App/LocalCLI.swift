@@ -119,7 +119,7 @@ enum LocalCLI {
 
     /// Environment for the chat CLIs: the login PATH, and nothing that would make
     /// Coucou's own hooks mistake this run for a VS Code session.
-    private static func childEnvironment() -> [String: String] {
+    static func childEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = searchPath
         for k in ["TERM_PROGRAM", "TERM_PROGRAM_VERSION", "VSCODE_PID", "CLAUDECODE"] { env[k] = nil }
@@ -214,7 +214,7 @@ final class LocalCLIChat {
 
     struct Reply { let text: String; let isError: Bool }
 
-    func send(engine: ChatEngine, query: String, context: PromptContext?) async -> Reply {
+    func send(engine: ChatEngine, query: String, context: PromptContext?, model: String?) async -> Reply {
         guard let cmd = engine.command else { return Reply(text: "Not a CLI engine.", isError: true) }
         guard !isBusy else { return Reply(text: "Still answering the previous message…", isError: true) }
         isBusy = true
@@ -255,6 +255,9 @@ final class LocalCLIChat {
             args = ["-p", "--output-format", "json",
                     "--append-system-prompt", instructions,
                     "--allowedTools", "WebSearch,WebFetch,Read"]
+            if let model = model?.trimmingCharacters(in: .whitespacesAndNewlines), !model.isEmpty {
+                args += ["--model", model]
+            }
             if let resumeId { args += ["--resume", resumeId] }
             if let dir = fileURL?.deletingLastPathComponent().path { args += ["--add-dir", dir] }
         case .codex:
